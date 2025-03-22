@@ -1,19 +1,46 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/nats-io/nats.go"
 )
 
+// Custom data structure that holds NATS connection handle and average packet processing delay
+type PacketProcessorContext struct {
+	natsConn       *nats.Conn
+	averageDelayMs int
+}
+
+// Creates PacketProcessorContext
+func NewPacketProcessorContext(nc *nats.Conn, averageDelayMs int) *PacketProcessorContext {
+	return &PacketProcessorContext{
+		natsConn:       nc,
+		averageDelayMs: averageDelayMs,
+	}
+}
+
+// Will sleep int [0, 2 * avg delay] interval (in milliseconds).
+// Sleep amount generation is cryptographically secure.
+func (ctx *PacketProcessorContext) addRandomDelay() {
+	rangeSize := 2*ctx.averageDelayMs + 1
+	bignum, _ := rand.Int(rand.Reader, big.NewInt(int64(rangeSize)))
+	delayMs := int(bignum.Int64())
+	time.Sleep(time.Millisecond * time.Duration(delayMs))
+}
+
 // Function to process the ethernet packet
-func processEthernetPacket(nc *nats.Conn, iface string, data []byte) {
+func (ctx *PacketProcessorContext) processEthernetPacket(iface string, data []byte) {
 	// Add your ethernet packet processing logic here
 	fmt.Printf("Processing ethernet packet: %s\n", iface)
-	
+
 	// Use gopacket to dissect the packet
 	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
 	if packet.ErrorLayer() != nil {
@@ -53,10 +80,27 @@ func processEthernetPacket(nc *nats.Conn, iface string, data []byte) {
 	} else {
 		subject = "outpktsec"
 	}
-	err := nc.Publish(subject, data)
+	// Add random delay (in ms)
+	ctx.addRandomDelay()
+	err := ctx.natsConn.Publish(subject, data)
 	if err != nil {
 		fmt.Println("Error publishing message:", err)
 	}
+}
+
+func (ctx *PacketProcessorContext) subscribeToSubjects() {
+	ctx.natsConn.Subscribe("inpktsec", func(m *nats.Msg) {
+		//fmt.Printf("Received a message: %s\n", string(m.Data))
+		// Process the incoming ethernet packet here
+		ctx.processEthernetPacket(m.Subject, m.Data)
+	})
+
+	// Simple Subscriber
+	ctx.natsConn.Subscribe("inpktinsec", func(m *nats.Msg) {
+		//fmt.Printf("Received a message: %s\n", string(m.Data))
+		// Process the incoming ethernet packet here
+		ctx.processEthernetPacket(m.Subject, m.Data)
+	})
 }
 
 func main() {
@@ -67,26 +111,25 @@ func main() {
 	}
 	fmt.Println("NATS_SURVEYOR_SERVERS: ", url)
 
+	averageDelayMs := 0
+	averageDelayStr := os.Getenv("MIDDLEBOX_PROCESSOR_AVG_DELAY_MS")
+	if averageDelayStr != "" {
+		delayMs, err := strconv.Atoi(averageDelayStr)
+		if err == nil {
+			averageDelayMs = delayMs
+		}
+	}
+	fmt.Printf("MIDDLEBOX_PROCESSOR_AVG_DELAY_MS: %d ms.\n", averageDelayMs)
 
-		// Connect to a server
+	// Connect to a server
 	nc, _ := nats.Connect(url)
 	defer nc.Drain()
-	// Simple Publisher
-	//nc.Publish("foo", []byte("Hello World"))
 
-	// Simple Subscriber
-	nc.Subscribe("inpktsec", func(m *nats.Msg) {
-		//fmt.Printf("Received a message: %s\n", string(m.Data))
-		// Process the incoming ethernet packet here
-		processEthernetPacket(nc, m.Subject, m.Data)
-	})
+	// Create packet processor context
+	pktProcessorCtx := NewPacketProcessorContext(nc, averageDelayMs)
 
-	// Simple Subscriber
-	nc.Subscribe("inpktinsec", func( m *nats.Msg) {
-		//fmt.Printf("Received a message: %s\n", string(m.Data))
-		// Process the incoming ethernet packet here
-		processEthernetPacket(nc, m.Subject, m.Data)
-	})
+	// Subscribe to subjects
+	pktProcessorCtx.subscribeToSubjects()
 
 	// Keep the connection alive
 	select {}
@@ -94,8 +137,6 @@ func main() {
 	// Drain connection (Preferred for responders)
 	// Close() not needed if this is called.
 
-
 	// Close connection
 	nc.Close()
-}	
-
+}
