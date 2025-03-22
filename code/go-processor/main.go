@@ -115,7 +115,7 @@ func main() {
 	averageDelayStr := os.Getenv("MIDDLEBOX_PROCESSOR_AVG_DELAY_MS")
 	if averageDelayStr != "" {
 		delayMs, err := strconv.Atoi(averageDelayStr)
-		if err == nil {
+		if err == nil && delayMs >= 0 {
 			averageDelayMs = delayMs
 		}
 	}
